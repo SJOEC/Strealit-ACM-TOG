@@ -4,7 +4,7 @@ Aplicación **Streamlit** que consulta, visualiza y actualiza la base de datos S
 
 Diseño minimalista en blanco y negro, estilo artículo LaTeX; las gráficas interactivas (Plotly) son la única parte con color.
 
-🔗 **App desplegada:** _(pega aquí el enlace de Streamlit Cloud tras desplegar)_
+🔗 **App desplegada:** https://acm-tog.streamlit.app
 
 ---
 

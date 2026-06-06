@@ -487,7 +487,7 @@ if en_streamlit_cloud():
         f"tu máquina. Necesitas **Google Chrome {CHROME_REQUERIDO}** instalado:"
     )
     st.code(
-        "git clone <URL-del-repositorio>\n"
+        "git clone https://github.com/SJOEC/Strealit-ACM-TOG.git\n"
         "cd <carpeta-del-repositorio>\n"
         "pip install -r requirements.txt -r requirements-scraper.txt\n"
         "python -m streamlit run app.py",
