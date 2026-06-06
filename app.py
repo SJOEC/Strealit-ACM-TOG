@@ -12,7 +12,6 @@ Arquitectura:
 """
 
 import os
-import platform
 from pathlib import Path
 
 import pandas as pd
@@ -33,6 +32,25 @@ st.set_page_config(
 )
 
 DB_PATH = str(Path(__file__).parent / "tog_q1_2025.sqlite")
+
+
+def en_streamlit_cloud() -> bool:
+    """
+    Heurística para saber si la app corre en Streamlit Community Cloud.
+    Allí el repositorio se clona bajo /mount/src/<repo>, una ruta que no existe
+    en una máquina local (Windows, macOS o Linux). Ante la duda, asume local.
+    """
+    try:
+        ruta = str(Path(__file__).resolve())
+    except Exception:
+        ruta = ""
+    if ruta.startswith("/mount/src"):
+        return True
+    if os.path.isdir("/mount/src"):
+        return True
+    if "streamlit" in os.environ.get("HOSTNAME", "").lower():
+        return True
+    return False
 
 # Color SOLO para las gráficas (el resto del tablero es B/N).
 TOPIC_COLORS = {
@@ -449,51 +467,68 @@ st.markdown(
     "Busca artículos publicados después de los ya almacenados, usando el scraper de "
     "navegador (Selenium + undetected-chromedriver) sobre ACM. Si encuentra nuevos, "
     "los guarda en SQLite e informa cuántos; si no hay, reconsulta los últimos 5 para "
-    "verificar cambios en sus métricas. Está pensado para ejecutarse **en local** y "
-    "necesita Google Chrome instalado."
+    "verificar cambios en sus métricas."
 )
 
-# En Linux sin pantalla (servidor) el navegador debe ir headless por defecto.
-sin_display = (platform.system() == "Linux" and not os.environ.get("DISPLAY"))
-
-# Verificación (no bloqueante) de Chrome. El scraper funciona con Chrome 149.
 CHROME_REQUERIDO = 149
-chrome_v = scraper.detectar_chrome_version()
-if chrome_v == CHROME_REQUERIDO:
-    st.success(f"Google Chrome {chrome_v} detectado.")
-elif chrome_v is None:
+
+if en_streamlit_cloud():
+    # En la nube el scraper no puede funcionar: los servidores de Streamlit no tienen
+    # navegador y Cloudflare bloquea las IP de datacenter al entrar a ACM. Se muestran
+    # las instrucciones para ejecutarlo en local.
     st.warning(
-        f"No pude verificar Google Chrome. El scraper necesita **Chrome "
-        f"{CHROME_REQUERIDO}** instalado; instálalo antes de ejecutar el scraping."
+        "El scraping solo funciona **en local**. Esta versión, desplegada en Streamlit "
+        "Cloud, sirve como dashboard de consulta y visualización: el navegador Chrome y "
+        "la evasión de Cloudflare que necesita el scraper no están disponibles en los "
+        "servidores de Streamlit."
+    )
+    st.markdown(
+        "Para ejecutar la actualización por scraping, clona el repositorio y córrelo en "
+        f"tu máquina. Necesitas **Google Chrome {CHROME_REQUERIDO}** instalado:"
+    )
+    st.code(
+        "git clone <URL-del-repositorio>\n"
+        "cd <carpeta-del-repositorio>\n"
+        "pip install -r requirements.txt -r requirements-scraper.txt\n"
+        "python -m streamlit run app.py",
+        language="bash",
+    )
+    st.caption(
+        "Al ejecutarla en local aparecerá aquí el botón para buscar artículos nuevos."
     )
 else:
-    st.warning(
-        f"Detecté Google Chrome {chrome_v}, pero el scraper funciona con la versión "
-        f"**{CHROME_REQUERIDO}**. Instala Chrome {CHROME_REQUERIDO} para que funcione."
-    )
+    # ── Ejecución local: verificación de Chrome + botón de scraping ──
+    chrome_v = scraper.detectar_chrome_version()
+    if chrome_v == CHROME_REQUERIDO:
+        st.success(f"Google Chrome {chrome_v} detectado.")
+    elif chrome_v is None:
+        st.warning(
+            f"No pude verificar Google Chrome. El scraper necesita **Chrome "
+            f"{CHROME_REQUERIDO}** instalado; instálalo antes de ejecutar el scraping."
+        )
+    else:
+        st.warning(
+            f"Detecté Google Chrome {chrome_v}, pero el scraper funciona con la versión "
+            f"**{CHROME_REQUERIDO}**. Instala Chrome {CHROME_REQUERIDO} para que funcione."
+        )
 
-headless = st.checkbox(
-    "Navegador headless (sin ventana)", value=sin_display,
-    help="Déjalo desmarcado para ver Chrome y resolver el captcha si aparece.",
-)
+    if st.button("Buscar artículos nuevos"):
+        with st.status("Ejecutando scraping…", expanded=True) as status:
+            try:
+                resultado = scraper.actualizar(
+                    DB_PATH, metodo="navegador", headless=False,
+                    version_main=CHROME_REQUERIDO, progress=status.write,
+                )
+                status.update(label="Scraping finalizado.", state="complete")
+            except Exception as e:
+                resultado = None
+                status.update(label="El scraping falló.", state="error")
+                st.error(str(e))
 
-if st.button("Buscar artículos nuevos"):
-    with st.status("Ejecutando scraping…", expanded=True) as status:
-        try:
-            resultado = scraper.actualizar(
-                DB_PATH, metodo="navegador", headless=headless,
-                version_main=CHROME_REQUERIDO, progress=status.write,
-            )
-            status.update(label="Scraping finalizado.", state="complete")
-        except Exception as e:
-            resultado = None
-            status.update(label="El scraping falló.", state="error")
-            st.error(str(e))
-
-    if resultado is not None:
-        st.session_state.scrape_result = resultado
-        st.session_state.data_version += 1   # invalida la caché de datos
-        st.rerun()                            # recarga el tablero con los datos nuevos
+        if resultado is not None:
+            st.session_state.scrape_result = resultado
+            st.session_state.data_version += 1   # invalida la caché de datos
+            st.rerun()                            # recarga el tablero con los datos nuevos
 
 # Resultado persistente tras el rerun
 res = st.session_state.scrape_result
