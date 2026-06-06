@@ -40,4 +40,4 @@ Para evaluar el 100% de la funcionalidad (incluyendo la actualización de artíc
 
 ```bash
 pip install -r requirements.txt -r requirements-scraper.txt
-streamlit run app.py
+python -m streamlit run app.py
