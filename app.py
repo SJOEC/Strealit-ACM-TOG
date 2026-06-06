@@ -9,8 +9,6 @@ Arquitectura:
   · scraper.py  → actualización por scraping con Selenium + undetected-chromedriver
                     sobre ACM (ejecución local; requiere Google Chrome instalado).
 
-El estilo es minimalista en blanco y negro, tipo artículo LaTeX; las gráficas
-interactivas son la única excepción y sí llevan color.
 """
 
 import os
@@ -191,7 +189,8 @@ journal = journal.iloc[0] if not journal.empty else "ACM Transactions on Graphic
 st.markdown(
     f"""
     <div class="latex-header">
-        <div class="latex-title">Análisis bibliométrico de {journal}</div>
+        <div class="latex-title">Análisis de {journal}</div>
+        <div class="latex-sub">Johan Farith Canelo Gonzalez</div>
         <div class="latex-sub">Dashboard del proceso KDD &mdash; Taller&nbsp;2, Minería de Datos (2016325)</div>
         <div class="latex-meta">Adquisición &middot; Almacenamiento &middot; Consulta &middot; Visualización</div>
     </div>
