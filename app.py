@@ -1,16 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-Taller 2 — Minería de Datos (2016325)
-Dashboard analítico (KDD) sobre artículos de *ACM Transactions on Graphics*.
+Talleres 2 y 4 — Minería de Datos (2016325)
+Dashboard analítico (KDD) sobre artículos de *ACM Transactions on Graphics*,
+ampliado con un sistema de búsqueda y recuperación de información (Taller 4).
 
 Arquitectura:
-  · app.py      → interfaz Streamlit (ligera: streamlit + pandas + plotly).
-  · db.py       → acceso/normalización de la base SQLite del Taller 1.
-  · scraper.py  → actualización por scraping con Selenium + undetected-chromedriver
-                    sobre ACM (ejecución local; requiere Google Chrome instalado).
+  · app.py         → interfaz Streamlit (streamlit + pandas + plotly).
+  · db.py          → acceso/normalización de la base SQLite del Taller 1.
+  · scraper.py     → actualización por scraping con Selenium +
+                       undetected-chromedriver sobre ACM (ejecución local).
+  · ir.py          → módulo de recuperación de información (Taller 4):
+                       procesamiento de texto, BM25, TF-IDF, LSA y RRF.
+  · build_index.py → precómputo del índice (se ejecuta fuera de la app).
+  · evaluacion.py  → consultas de prueba, juicios de relevancia y métricas.
+
+El buscador NO calcula nada pesado en caliente: carga con `st.cache_resource`
+el índice precomputado (`index/ir_index.joblib`) y cada consulta se reduce a
+una multiplicación dispersa o a un producto punto de 40 dimensiones.
 
 """
 
+import html
 import os
 from pathlib import Path
 
@@ -19,6 +29,7 @@ import plotly.express as px
 import streamlit as st
 
 import db
+import ir
 import scraper
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -177,6 +188,23 @@ st.markdown(
 
     /* ── Tabla estilo booktabs ── */
     .stDataFrame { border-top: 1.5px solid var(--regla); border-bottom: 1.5px solid var(--regla); }
+
+    /* ── Resultados del buscador ── */
+    .hit { border-bottom: 1px solid #d4d4d4; padding: .75rem 0 .8rem 0; }
+    .hit:first-child { border-top: 1px solid var(--regla); }
+    .hit .cab { display: flex; gap: .6rem; align-items: baseline; }
+    .hit .pos { font-weight: 700; min-width: 1.9rem; }
+    .hit .tit { font-weight: 700; font-size: 1.03rem; line-height: 1.32; }
+    .hit .meta { font-size: .84rem; color: var(--gris); margin: .3rem 0 .3rem 2.5rem; }
+    .hit .frag { font-size: .9rem; margin-left: 2.5rem; text-align: justify; }
+    .hit .sc {
+        font-size: .78rem; border: 1px solid var(--regla); padding: .05rem .4rem;
+        white-space: nowrap; margin-left: auto;
+    }
+    .hit a { color: var(--tinta); }
+    .cmp-col { font-size: .88rem; }
+    .cmp-col .r { padding: .35rem 0; border-bottom: 1px dotted #cfcfcf; }
+    .cmp-col .r.si { border-left: 3px solid var(--tinta); padding-left: .5rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -208,9 +236,9 @@ st.markdown(
     f"""
     <div class="latex-header">
         <div class="latex-title">Análisis de {journal}</div>
-        <div class="latex-sub">Johan Farith Canelo Gonzalez</div>
-        <div class="latex-sub">Dashboard del proceso KDD &mdash; Taller&nbsp;2, Minería de Datos (2016325)</div>
-        <div class="latex-meta">Adquisición &middot; Almacenamiento &middot; Consulta &middot; Visualización</div>
+        <div class="latex-sub">NOMBRE DEL AUTOR</div>
+        <div class="latex-sub">Dashboard del proceso KDD y buscador de artículos &mdash; Talleres&nbsp;2 y&nbsp;4, Minería de Datos (2016325)</div>
+        <div class="latex-meta">Adquisición &middot; Almacenamiento &middot; Consulta &middot; Visualización &middot; Recuperación de información</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -403,9 +431,226 @@ else:
         st.plotly_chart(estilo(fig, alto=360), width='stretch')
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  3 · Artículos  (tabla interactiva)
+#  3 · Buscador de artículos  (Taller 4 — recuperación de información)
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown('<div class="sec"><span class="num">3</span>Artículos</div>', unsafe_allow_html=True)
+st.markdown('<div class="sec"><span class="num">3</span>Buscador de artículos</div>',
+            unsafe_allow_html=True)
+
+RUTA_INDICE = Path(__file__).parent / "index" / "ir_index.joblib"
+
+
+@st.cache_resource(show_spinner=False)
+def cargar_indice(ruta: str, marca: float):
+    """
+    Carga el índice precomputado UNA sola vez por proceso.
+
+    `marca` es la fecha de modificación del archivo: si se reconstruye el
+    índice (por ejemplo después de un scraping), la clave de caché cambia y
+    Streamlit vuelve a cargarlo. La app nunca construye el índice.
+    """
+    return ir.cargar_indice(ruta)
+
+
+indice = None
+if RUTA_INDICE.exists():
+    try:
+        indice = cargar_indice(str(RUTA_INDICE), RUTA_INDICE.stat().st_mtime)
+    except Exception as e:                                  # noqa: BLE001
+        st.error(f"No pude cargar el índice: {e}")
+else:
+    st.warning(
+        "Falta el índice del buscador. Constrúyelo una vez con "
+        "`python build_index.py` y vuelve a cargar la página."
+    )
+
+if indice is not None:
+    info = indice["info"]
+    par = indice["params"]
+
+    st.markdown(
+        "Escribe una consulta en lenguaje natural. El ranking se calcula sobre "
+        "el texto de los artículos (título ponderado ×{} y resumen), no con "
+        "coincidencia exacta de palabras.".format(par["peso_titulo"])
+    )
+
+    with st.form("form_busqueda"):
+        cq, cm, ck = st.columns([5, 2.2, 1.1])
+        with cq:
+            consulta = st.text_input(
+                "Consulta",
+                value=st.session_state.get("consulta_previa", ""),
+                placeholder="p. ej. differentiable rendering of implicit surfaces",
+                label_visibility="collapsed",
+            )
+        with cm:
+            etiquetas = {
+                "bm25": "BM25 (léxica)",
+                "lsa": "LSA · TF-IDF+SVD (semántica reducida)",
+                "tfidf": "TF-IDF completo (sin reducir)",
+                "hibrido": "Híbrido BM25+LSA (RRF)",
+                "ambas": "Comparar BM25 vs LSA",
+            }
+            metodo = st.selectbox(
+                "Estrategia", list(etiquetas), index=1,
+                format_func=lambda k: etiquetas[k],
+                label_visibility="collapsed",
+            )
+        with ck:
+            top_k = st.selectbox("Resultados", [5, 10, 20], index=1,
+                                 label_visibility="collapsed")
+        buscar_click = st.form_submit_button("Buscar", type="primary")
+
+    st.caption(
+        "Índice: {} artículos · vocabulario BM25 {:,} términos · TF-IDF {:,} "
+        "(uni+bigramas, dispersión {:.3f}) · reducción {:,} → {} dimensiones "
+        "por Truncated SVD ({:.1%} de varianza explicada).".format(
+            info["n_docs"], info["vocab_bm25"], info["vocab_tfidf"],
+            info["dispersion_tfidf"], info["dim_original"],
+            info["dim_reducida"], info["varianza_explicada"],
+        )
+    )
+
+    def tarjeta(x) -> str:
+        """Una fila de resultado, con todos los campos que pide el enunciado."""
+        fecha = str(x.get("publication_date") or "")
+        ts = db.parse_fecha(fecha)
+        if pd.notna(ts):
+            fecha = ts.strftime("%d/%m/%Y")
+        autores = db.autores_legibles(x.get("authors_raw"))
+        if len(autores) > 150:
+            autores = autores[:150] + "…"
+        doi = str(x.get("doi") or "")
+        url = str(x.get("url") or "")
+        enlace = (f'<a href="{html.escape(url)}" target="_blank">{html.escape(doi or url)}</a>'
+                  if url else html.escape(doi))
+        return (
+            '<div class="hit">'
+            f'<div class="cab"><span class="pos">{int(x["posicion"])}.</span>'
+            f'<span class="tit">{html.escape(str(x["title"]))}</span>'
+            f'<span class="sc">{x["puntaje"]:.4f}</span></div>'
+            f'<div class="meta">{html.escape(autores)}<br>'
+            f'{html.escape(fecha)} · {html.escape(str(x.get("topic_label") or "N/A"))} · '
+            f'{enlace} · {int(x.get("citations") or 0)} citas</div>'
+            f'<div class="frag">{html.escape(str(x.get("fragmento") or ""))}</div>'
+            '</div>'
+        )
+
+    def mostrar(res: pd.DataFrame, titulo: str, ms: float):
+        st.markdown(
+            f'<div style="margin:.9rem 0 .2rem 0;font-weight:700;">{titulo}'
+            f'<span style="font-weight:400;color:#6b6b6b;font-size:.85rem;">'
+            f'  —  {len(res)} resultados en {ms:.1f} ms</span></div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown("".join(tarjeta(x) for _, x in res.iterrows()),
+                    unsafe_allow_html=True)
+
+    if buscar_click and consulta.strip():
+        st.session_state.consulta_previa = consulta
+
+    consulta_activa = st.session_state.get("consulta_previa", "").strip()
+
+    if consulta_activa:
+        if metodo == "ambas":
+            r1 = ir.buscar(indice, consulta_activa, "bm25", top_k)
+            r2 = ir.buscar(indice, consulta_activa, "lsa", top_k)
+            if r1.empty and r2.empty:
+                st.info(
+                    "Ninguna estrategia encontró artículos. Ningún término de la "
+                    "consulta está en el vocabulario del corpus."
+                )
+            else:
+                st.caption(
+                    "Los puntajes NO son comparables entre columnas: BM25 no está "
+                    "acotado y el coseno latente vive en [-1, 1]. Compara el orden, "
+                    "no los valores."
+                )
+                ca, cb = st.columns(2)
+                for col, r, nom in ((ca, r1, "BM25 (léxica)"),
+                                    (cb, r2, "LSA (semántica reducida)")):
+                    with col:
+                        st.markdown(f"**{nom}** · {r.attrs.get('ms', 0):.1f} ms")
+                        if r.empty:
+                            st.caption("Sin resultados.")
+                            continue
+                        otros = set(r2["paper_id"]) if nom.startswith("BM25") else set(r1["paper_id"])
+                        filas = []
+                        for _, x in r.iterrows():
+                            marca = "si" if int(x["paper_id"]) in otros else ""
+                            filas.append(
+                                f'<div class="r {marca}"><b>{int(x["posicion"])}.</b> '
+                                f'{html.escape(str(x["title"]))}<br>'
+                                f'<span style="color:#6b6b6b;font-size:.8rem;">'
+                                f'{x["puntaje"]:.4f}</span></div>'
+                            )
+                        st.markdown(f'<div class="cmp-col">{"".join(filas)}</div>',
+                                    unsafe_allow_html=True)
+                comunes = len(set(r1["paper_id"]) & set(r2["paper_id"]))
+                st.caption(
+                    f"{comunes} de {top_k} artículos coinciden entre las dos "
+                    f"estrategias (marcados con una barra a la izquierda)."
+                )
+        else:
+            res = ir.buscar(indice, consulta_activa, metodo, top_k)
+            if res.empty:
+                st.info(
+                    "Sin resultados: ningún término de la consulta está en el "
+                    "vocabulario del corpus. Prueba con otras palabras."
+                )
+            else:
+                mostrar(res, ir.METODOS[metodo], res.attrs.get("ms", 0.0))
+
+        with st.expander("¿Cómo se calculó este ranking?"):
+            st.markdown(
+                """
+**Procesamiento del texto.** Cada artículo se representa por su título
+(repetido {peso} veces, para que pese más que el resumen) seguido del resumen.
+El texto se pasa a minúsculas, se le quitan diacríticos y puntuación —
+conservando el guion interno de términos como *real-time* o *out-of-core* —,
+se tokeniza por espacios y se descartan *stopwords* inglesas, tokens de menos
+de tres caracteres y números sueltos. No se aplica *stemming*.
+
+**BM25 (léxica).** Puntúa la coincidencia de términos considerando su
+frecuencia en el artículo (con saturación, k1 = {k1}), su rareza en el corpus
+(idf) y la longitud del documento (b = {b}). Un puntaje alto significa que la
+consulta comparte términos poco frecuentes con ese artículo. No está acotado.
+
+**LSA (semántica sobre representación reducida).** El corpus se vectoriza con
+TF-IDF sobre unigramas y bigramas ({dim_o:,} dimensiones) y se proyecta con
+Truncated SVD a **{dim_r} dimensiones**. La consulta se transforma con el mismo
+TF-IDF y se proyecta con la misma matriz de componentes, de modo que quede en
+el mismo espacio latente; el puntaje es el coseno, en [-1, 1]. Al comparar
+temas latentes en vez de palabras exactas, recupera artículos que usan
+vocabulario distinto al de la consulta.
+
+**Híbrido (RRF).** Fusiona los dos rankings con
+*Reciprocal Rank Fusion*: cada artículo suma 1/({rrf} + posición) en cada
+lista. Solo usa posiciones, así que no exige que las escalas de BM25 y del
+coseno sean comparables.
+
+**Orden y empates.** Se ordena por puntaje descendente; los empates se rompen
+por número de citas y luego por identificador, de forma determinista. Los
+artículos con puntaje ≤ 0 no se muestran.
+                """.format(
+                    peso=par["peso_titulo"], k1=par["bm25_k1"], b=par["bm25_b"],
+                    dim_o=info["dim_original"], dim_r=info["dim_reducida"],
+                    rrf=par["rrf_k"],
+                )
+            )
+    else:
+        st.caption("Escribe una consulta y presiona **Buscar**.")
+
+    if len(df) != info["n_docs"]:
+        st.warning(
+            f"La base tiene {len(df)} artículos y el índice se construyó con "
+            f"{info['n_docs']}. Vuelve a ejecutar `python build_index.py` para "
+            "que el buscador incluya los artículos nuevos."
+        )
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  4 · Artículos  (tabla interactiva)
+# ──────────────────────────────────────────────────────────────────────────────
+st.markdown('<div class="sec"><span class="num">4</span>Artículos</div>', unsafe_allow_html=True)
 
 if dff.empty:
     st.info("La tabla no tiene filas con los filtros actuales.")
@@ -436,9 +681,9 @@ else:
     st.caption(f"{len(tabla):,} artículos tras aplicar los filtros.")
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  4 · Consulta SQL personalizada (solo lectura)
+#  5 · Consulta SQL personalizada (solo lectura)
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown('<div class="sec"><span class="num">4</span>Consulta SQL</div>', unsafe_allow_html=True)
+st.markdown('<div class="sec"><span class="num">5</span>Consulta SQL</div>', unsafe_allow_html=True)
 
 with st.expander("Ejecutar una consulta SELECT sobre la base"):
     consulta = st.text_area(
@@ -458,9 +703,9 @@ with st.expander("Ejecutar una consulta SELECT sobre la base"):
             st.error(f"No se pudo ejecutar: {e}")
 
 # ──────────────────────────────────────────────────────────────────────────────
-#  5 · Actualización mediante scraping
+#  6 · Actualización mediante scraping
 # ──────────────────────────────────────────────────────────────────────────────
-st.markdown('<div class="sec"><span class="num">5</span>Actualización (scraping)</div>',
+st.markdown('<div class="sec"><span class="num">6</span>Actualización (scraping)</div>',
             unsafe_allow_html=True)
 
 st.markdown(
@@ -570,6 +815,6 @@ if res:
 st.markdown(
     "<div style='margin-top:2rem;border-top:1px solid #1a1a1a;padding-top:.5rem;"
     "font-size:.8rem;color:#6b6b6b;'>Universidad Nacional de Colombia · Minería de Datos "
-    "2016325 · Proceso KDD: adquisición, almacenamiento, consulta y visualización.</div>",
+    "2016325 · Proceso KDD: adquisición, almacenamiento, consulta, visualización y recuperación de información.</div>",
     unsafe_allow_html=True,
 )
